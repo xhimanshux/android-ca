@@ -1,0 +1,579 @@
+package com.example.cse226
+
+import android.content.Context
+import android.os.Bundle
+import androidx.activity.ComponentActivity
+import androidx.activity.compose.setContent
+import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Clear
+import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Search
+import androidx.compose.material3.*
+import androidx.compose.runtime.*
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.dp
+import androidx.lifecycle.AbstractSavedStateViewModelFactory
+import androidx.lifecycle.SavedStateHandle
+import androidx.lifecycle.ViewModel
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.lifecycle.viewModelScope
+import androidx.lifecycle.viewmodel.compose.viewModel
+import androidx.room.*
+import androidx.savedstate.SavedStateRegistryOwner
+import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.SharingStarted
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.flatMapLatest
+import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.launch
+
+@Entity(tableName = "contacts")
+data class ContactEntity(
+    @PrimaryKey(autoGenerate = true)
+    val id: Long = 0L,
+    val name: String,
+    val phone: String,
+    val email: String
+)
+
+@Dao
+interface ContactDao {
+
+    @Query("SELECT * FROM contacts WHERE name LIKE '%' || :query || '%' OR phone LIKE '%' || :query || '%' ORDER BY name ASC")
+    fun searchContacts(query: String): Flow<List<ContactEntity>>
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertContact(contact: ContactEntity)
+
+    @Query("DELETE FROM contacts WHERE id = :id")
+    suspend fun deleteContact(id: Long)
+
+    @Query("SELECT COUNT(*) FROM contacts")
+    suspend fun getContactCount(): Int
+}
+
+@Database(
+    entities = [ContactEntity::class],
+    version = 1,
+    exportSchema = false
+)
+abstract class ContactDatabase : RoomDatabase() {
+
+    abstract fun contactDao(): ContactDao
+
+    companion object {
+        @Volatile
+        private var INSTANCE: ContactDatabase? = null
+
+        fun getDatabase(context: Context): ContactDatabase {
+            return INSTANCE ?: synchronized(this) {
+                val instance = Room.databaseBuilder(
+                    context.applicationContext,
+                    ContactDatabase::class.java,
+                    "contacts_database"
+                ).build()
+
+                INSTANCE = instance
+                instance
+            }
+        }
+    }
+}
+
+class ContactRepository(
+    private val contactDao: ContactDao
+) {
+
+    fun searchContacts(query: String): Flow<List<ContactEntity>> {
+        return contactDao.searchContacts(query)
+    }
+
+    suspend fun insertContact(
+        name: String,
+        phone: String,
+        email: String
+    ) {
+        contactDao.insertContact(
+            ContactEntity(
+                name = name,
+                phone = phone,
+                email = email
+            )
+        )
+    }
+
+    suspend fun deleteContact(id: Long) {
+        contactDao.deleteContact(id)
+    }
+
+    suspend fun seedInitialDataIfNeeded() {
+        if (contactDao.getContactCount() == 0) {
+
+            contactDao.insertContact(
+                ContactEntity(
+                    name = "Alice Smith",
+                    phone = "555-0101",
+                    email = "alice@example.com"
+                )
+            )
+
+            contactDao.insertContact(
+                ContactEntity(
+                    name = "Bob Jones",
+                    phone = "555-0202",
+                    email = "bob@example.com"
+                )
+            )
+
+            contactDao.insertContact(
+                ContactEntity(
+                    name = "Charlie Brown",
+                    phone = "555-0303",
+                    email = "charlie@example.com"
+                )
+            )
+
+            contactDao.insertContact(
+                ContactEntity(
+                    name = "Diana Prince",
+                    phone = "555-0404",
+                    email = "diana@example.com"
+                )
+            )
+
+            contactDao.insertContact(
+                ContactEntity(
+                    name = "Ethan Hunt",
+                    phone = "555-0505",
+                    email = "ethan@example.com"
+                )
+            )
+        }
+    }
+}
+
+@OptIn(ExperimentalCoroutinesApi::class)
+class ContactSearchViewModel(
+    private val repository: ContactRepository,
+    private val savedStateHandle: SavedStateHandle
+) : ViewModel() {
+
+    companion object {
+        private const val SEARCH_QUERY_KEY = "search_query"
+    }
+
+    val searchQuery: StateFlow<String> =
+        savedStateHandle.getStateFlow(SEARCH_QUERY_KEY, "")
+
+    val contacts: StateFlow<List<ContactEntity>> =
+        searchQuery
+            .flatMapLatest { query ->
+                repository.searchContacts(query)
+            }
+            .stateIn(
+                scope = viewModelScope,
+                started = SharingStarted.WhileSubscribed(5000),
+                initialValue = emptyList()
+            )
+
+    init {
+        viewModelScope.launch {
+            repository.seedInitialDataIfNeeded()
+        }
+    }
+
+    fun updateSearchQuery(query: String) {
+        savedStateHandle[SEARCH_QUERY_KEY] = query
+    }
+
+    fun addContact(
+        name: String,
+        phone: String,
+        email: String
+    ) {
+        viewModelScope.launch {
+            if (name.isNotBlank()) {
+                repository.insertContact(name, phone, email)
+            }
+        }
+    }
+
+    fun deleteContact(id: Long) {
+        viewModelScope.launch {
+            repository.deleteContact(id)
+        }
+    }
+}
+
+class ContactSearchViewModelFactory(
+    owner: SavedStateRegistryOwner,
+    private val repository: ContactRepository,
+    defaultArgs: Bundle? = null
+) : AbstractSavedStateViewModelFactory(owner, defaultArgs) {
+
+    override fun <T : ViewModel> create(
+        key: String,
+        modelClass: Class<T>,
+        handle: SavedStateHandle
+    ): T {
+
+        if (modelClass.isAssignableFrom(ContactSearchViewModel::class.java)) {
+            @Suppress("UNCHECKED_CAST")
+            return ContactSearchViewModel(repository, handle) as T
+        }
+
+        throw IllegalArgumentException("Unknown ViewModel class")
+    }
+}
+
+class MainActivity : ComponentActivity() {
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+
+        val database =
+            ContactDatabase.getDatabase(applicationContext)
+
+        val repository =
+            ContactRepository(database.contactDao())
+
+        setContent {
+            MaterialTheme {
+                Surface(
+                    modifier = Modifier.fillMaxSize(),
+                    color = MaterialTheme.colorScheme.background
+                ) {
+                    val viewModel: ContactSearchViewModel = viewModel(
+                        factory = ContactSearchViewModelFactory(
+                            this,
+                            repository
+                        )
+                    )
+
+                    ContactSearchScreen(viewModel)
+                }
+            }
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun ContactSearchScreen(
+    viewModel: ContactSearchViewModel
+) {
+
+    val searchQuery by
+        viewModel.searchQuery.collectAsStateWithLifecycle()
+
+    val contacts by
+        viewModel.contacts.collectAsStateWithLifecycle()
+
+    var showAddDialog by remember {
+        mutableStateOf(false)
+    }
+
+    var nameInput by remember {
+        mutableStateOf("")
+    }
+
+    var phoneInput by remember {
+        mutableStateOf("")
+    }
+
+    var emailInput by remember {
+        mutableStateOf("")
+    }
+
+    Scaffold(
+        topBar = {
+            TopAppBar(
+                title = {
+                    Text("Contact Search (SavedStateHandle)")
+                },
+                colors = TopAppBarDefaults.topAppBarColors(
+                    containerColor =
+                        MaterialTheme.colorScheme.primaryContainer,
+                    titleContentColor =
+                        MaterialTheme.colorScheme.onPrimaryContainer
+                )
+            )
+        },
+
+        floatingActionButton = {
+            FloatingActionButton(
+                onClick = {
+                    nameInput = ""
+                    phoneInput = ""
+                    emailInput = ""
+                    showAddDialog = true
+                },
+                containerColor = MaterialTheme.colorScheme.primary
+            ) {
+                Icon(
+                    Icons.Default.Add,
+                    contentDescription = "Add Contact"
+                )
+            }
+        }
+
+    ) { innerPadding ->
+
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(innerPadding)
+                .padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(16.dp)
+        ) {
+
+            OutlinedTextField(
+                value = searchQuery,
+                onValueChange = {
+                    viewModel.updateSearchQuery(it)
+                },
+                modifier = Modifier.fillMaxWidth(),
+                placeholder = {
+                    Text("Search contacts by name or phone...")
+                },
+                leadingIcon = {
+                    Icon(
+                        Icons.Default.Search,
+                        contentDescription = "Search Icon"
+                    )
+                },
+                trailingIcon = {
+                    if (searchQuery.isNotEmpty()) {
+                        IconButton(
+                            onClick = {
+                                viewModel.updateSearchQuery("")
+                            }
+                        ) {
+                            Icon(
+                                Icons.Default.Clear,
+                                contentDescription = "Clear Search"
+                            )
+                        }
+                    }
+                },
+                singleLine = true
+            )
+
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                colors = CardDefaults.cardColors(
+                    containerColor =
+                        MaterialTheme.colorScheme.surfaceVariant
+                )
+            ) {
+                Column(
+                    modifier = Modifier.padding(12.dp)
+                ) {
+                    Text(
+                        text = "Process Death & SavedStateHandle",
+                        style = MaterialTheme.typography.titleSmall,
+                        fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.primary
+                    )
+
+                    Spacer(modifier = Modifier.height(4.dp))
+
+                    Text(
+                        text = "Typed query is preserved via SavedStateHandle in ViewModel and passed into Room database query.",
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                }
+            }
+
+            if (contacts.isEmpty()) {
+
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .weight(1f),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(
+                        text = "No contacts found matching \"$searchQuery\"",
+                        style = MaterialTheme.typography.bodyLarge,
+                        color =
+                            MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+
+            } else {
+
+                LazyColumn(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .weight(1f),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+
+                    items(
+                        contacts,
+                        key = { it.id }
+                    ) { contact ->
+
+                        Card(
+                            modifier = Modifier.fillMaxWidth(),
+                            elevation = CardDefaults.cardElevation(
+                                defaultElevation = 2.dp
+                            )
+                        ) {
+
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(16.dp),
+                                horizontalArrangement =
+                                    Arrangement.SpaceBetween,
+                                verticalAlignment =
+                                    Alignment.CenterVertically
+                            ) {
+
+                                Column(
+                                    modifier = Modifier.weight(1f)
+                                ) {
+
+                                    Text(
+                                        text = contact.name,
+                                        style =
+                                            MaterialTheme.typography.titleMedium,
+                                        fontWeight = FontWeight.Bold
+                                    )
+
+                                    Spacer(
+                                        modifier = Modifier.height(2.dp)
+                                    )
+
+                                    Text(
+                                        text = "Phone: ${contact.phone}",
+                                        style =
+                                            MaterialTheme.typography.bodyMedium,
+                                        color =
+                                            MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+
+                                    Spacer(
+                                        modifier = Modifier.height(2.dp)
+                                    )
+
+                                    Text(
+                                        text = "Email: ${contact.email}",
+                                        style =
+                                            MaterialTheme.typography.bodySmall,
+                                        color =
+                                            MaterialTheme.colorScheme.primary
+                                    )
+                                }
+
+                                IconButton(
+                                    onClick = {
+                                        viewModel.deleteContact(contact.id)
+                                    }
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.Delete,
+                                        contentDescription = "Delete contact",
+                                        tint =
+                                            MaterialTheme.colorScheme.error
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        if (showAddDialog) {
+
+            AlertDialog(
+                onDismissRequest = {
+                    showAddDialog = false
+                },
+
+                title = {
+                    Text("New Contact")
+                },
+
+                text = {
+                    Column(
+                        verticalArrangement =
+                            Arrangement.spacedBy(12.dp)
+                    ) {
+
+                        OutlinedTextField(
+                            value = nameInput,
+                            onValueChange = {
+                                nameInput = it
+                            },
+                            label = {
+                                Text("Name")
+                            },
+                            singleLine = true,
+                            modifier = Modifier.fillMaxWidth()
+                        )
+
+                        OutlinedTextField(
+                            value = phoneInput,
+                            onValueChange = {
+                                phoneInput = it
+                            },
+                            label = {
+                                Text("Phone")
+                            },
+                            singleLine = true,
+                            modifier = Modifier.fillMaxWidth()
+                        )
+
+                        OutlinedTextField(
+                            value = emailInput,
+                            onValueChange = {
+                                emailInput = it
+                            },
+                            label = {
+                                Text("Email")
+                            },
+                            singleLine = true,
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                    }
+                },
+
+                confirmButton = {
+                    TextButton(
+                        onClick = {
+                            viewModel.addContact(
+                                nameInput,
+                                phoneInput,
+                                emailInput
+                            )
+                            showAddDialog = false
+                        }
+                    ) {
+                        Text("Save")
+                    }
+                },
+
+                dismissButton = {
+                    TextButton(
+                        onClick = {
+                            showAddDialog = false
+                        }
+                    ) {
+                        Text("Cancel")
+                    }
+                }
+            )
+        }
+    }
+}
